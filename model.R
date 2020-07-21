@@ -19,11 +19,16 @@ library(xgboost)
 library(car)
 #install.packages('irr')
 library(irr)
+#install.packages('forecast')
+library(forecast)
+install.packages('Metrics')
+library(Metrics)
 options(scipen=100)
 ################################################
 
 
 movie <- read.csv('movie.csv', header=T, stringsAsFactors=T, na.strings=c('', NA), fileEncoding='UTF-8')
+movie2 <- read.csv('movie.csv', header=T, stringsAsFactors=T, na.strings=c('', NA), fileEncoding='UTF-8')
 head(movie)
 summary(movie)
 str(movie)
@@ -38,12 +43,10 @@ movie = movie %>% filter(!is.na(audience))
 # release_date 결측치 제거
 movie = movie %>% filter(!is.na(release_date))
 
-
 # audience 10만 이상
 #hist(movie$audience)
 #movie <- movie[movie$audience > 100000, ]
 #hist(movie$audience)
-
 # audience 로그 변환
 hist(movie$audience)
 movie$audience <- log(movie$audience, base=10)
@@ -56,9 +59,9 @@ hist(movie$audience)
 movie$release_date <- as.Date(movie$release_date)
 # release_date가 한달 이내인 영화 제외(현재 상영중)
 movie <- movie[movie$release_date < Sys.Date() - 30, ]
-# release_date 2000년 이전 영화 제외
+# release_date 2011년 이전 영화 제외
 movie_order <- order(movie$release_date)
-movie <- movie[movie_order, ][movie[movie_order, ]$release_date > as.Date('2000-01-01'), ]
+movie <- movie[movie_order, ][movie[movie_order, ]$release_date > as.Date('2010-12-31'), ]
 
 
 # country one-hot encoding
@@ -162,43 +165,30 @@ movie$actor_all <- movie$actor1_m + movie$actor2_m + movie$actor3_m
 
 # genre 성인 영화 제외
 movie <- movie[!grepl('성인물', movie$genre), ]
-# genre 드라마|멜로/로맨스|액션|기타로 분리
 # genre one-hot encoding
-unique(movie$genre)
-genre_split <- strsplit(as.character(movie$genre), '\\|')
+a <- as.data.frame(table(unlist(genre_split)))
+a[a$Freq > 400, ]
 for(i in 1:length(movie$movie_id)) {
-  if(genre_split[[i]][1] %in% c('드라마', '멜로/로맨스', '액션')) {
-    movie$genre_f[i] <- genre_split[[i]][1]
-  } else {
-    movie$genre_f[i] <- '기타'
+  movie$genre_drama[i] <- 0
+  movie$genre_action[i] <- 0
+  movie$genre_comedy[i] <- 0
+  movie$genre_etc[i] <- 0
+  for(j in 1:length(genre_split[[i]])) {
+    if(genre_split[[i]][j] == '드라마') {
+      movie$genre_drama[i] <- 1
+    }
+    if(genre_split[[i]][j] == '액션') {
+      movie$genre_action[i] <- 1
+    }
+    if(genre_split[[i]][j] == '코미디') {
+      movie$genre_comedy[i] <- 1
+    }
+    if(!genre_split[[i]][j] %in% c('드라마', '액션', '코미디')) {
+      movie$genre_etc[i] <- 1
+    }
   }
 }
-movie$genre_f <- as.factor(movie$genre_f)
 
-for(i in 1:length(movie$movie_id)) {
-  if(genre_split[[i]][1] == '드라마') {
-    movie$genre_drama[i] <- 1
-    movie$genre_romance[i] <- 0
-    movie$genre_action[i] <- 0
-    movie$genre_etc[i] <- 0
-  } else if(genre_split[[i]][1] == '멜로/로맨스') {
-    movie$genre_drama[i] <- 0
-    movie$genre_romance[i] <- 1
-    movie$genre_action[i] <- 0
-    movie$genre_etc[i] <- 0
-  } else if(genre_split[[i]][1] == '액션') {
-    movie$genre_drama[i] <- 0
-    movie$genre_romance[i] <- 0
-    movie$genre_action[i] <- 1
-    movie$genre_etc[i] <- 0
-  } else {
-    movie$genre_drama[i] <- 0
-    movie$genre_romance[i] <- 0
-    movie$genre_action[i] <- 0
-    movie$genre_etc[i] <- 1
-  }
-}
-movie$
 
 # rating one-hot encoding
 # 연소자관람가, 모든 관람객이 관람할 수 있는 등급, 미성년자관람가 -> 전체관람가
@@ -237,23 +227,48 @@ for(i in 1: length(movie$movie_id)) {
   }
 }
 
+# series 평균
+series_split <- strsplit(as.character(movie$series), ',')
+for(i in 1:length(movie$movie_id)) {
+  empty_vec <- vector()
+  if(!is.na(series_split[[i]][1])) {
+    for(j in 1:length(series_split[[i]])) {
+      if(series_split[[i]][j] %in% movie2$title) {
+        if(movie$release_date[i] > movie2[movie2$title == series_split[[i]][j], ]$release_date) {
+          empty_vec <- c(empty_vec, movie2[movie2$title == series_split[[i]][j], ]$audience)
+        }
+      }
+    }
+    if(length(empty_vec) == 0) {
+      movie$series_m[i] <- NA
+    } else {
+      movie$series_m[i] <- mean(empty_vec)
+    }
+  } else {
+    movie$series_m[i] <- NA
+  }
+}
+#movie$series_m[is.na(movie$series_m)] <- mean(movie$series_m, na.rm=T)
+#movie$series_m[is.na(movie$series_m)] <- median(movie$series_m, na.rm=T)
+movie$series_m[is.na(movie$series_m)] <- 0
+
 
 ################################################ XGBoost
-movie_train <- movie[1:8972, ]
-movie_test <- movie[8973:9969, ]
+movie_train <- movie[1:7283, ]
+movie_test <- movie[7284:7383, ]
 
 mat_train <- model.matrix(
   audience~
-  country_ko+country_us+country_etc+director_m+producer_m+actor_all
-  +genre_drama+genre_romance+genre_action+genre_etc+screen+running_time
-  +rating_all+rating_12+rating_15+rating_adult,
+    country_ko+country_us+country_etc+genre_drama
+  +genre_action+genre_comedy+genre_etc+screen+running_time
+  +rating_all+rating_12+rating_15+rating_adult+screen,
   movie_train
 )
 mat_test <- model.matrix(
   audience~
-    country_ko+country_us+country_etc+director_m+producer_m+actor_all
-  +genre_drama+genre_romance+genre_action+genre_etc+screen+running_time
-  +rating_all+rating_12+rating_15+rating_adult,
+    country_ko+country_us+country_etc+genre_drama
+  +genre_action+genre_comedy+genre_etc+screen+running_time
+  +rating_all+rating_12+rating_15+rating_adult+screen,
   movie_test
 )
 
@@ -271,274 +286,290 @@ summary(model_xg)
 result_xg <- predict(model_xg, mat_test)
 cbind(result_xg, movie_test$audience)
 
-# 오차율 937426.7
-RMSE(10^result_xg, 10^movie_test$audience)
+# 오차율 1.047298
+mase(10^movie_test$audience, 10^result_xg)
+################################################ 
+
+
+################################################ XGBoost director
+movie_train <- movie[1:7283, ]
+movie_test <- movie[7284:7383, ]
+
+mat_train <- model.matrix(
+  audience~
+  country_ko+country_us+country_etc+director_m
+  +genre_drama+genre_action+genre_comedy+genre_etc+screen+running_time
+  +rating_all+rating_12+rating_15+rating_adult+screen,
+  movie_train
+)
+mat_test <- model.matrix(
+  audience~
+    country_ko+country_us+country_etc+director_m
+  +genre_drama+genre_action+genre_comedy+genre_etc+screen+running_time
+  +rating_all+rating_12+rating_15+rating_adult+screen,
+  movie_test
+)
+
+model_xg <- xgb.train(
+  verbose=0,
+  eta=0.025,
+  booster='gbtree',
+  max_depth=3,
+  nround=2500,
+  eval_metric='rmse',
+  data=xgb.DMatrix(mat_train, label=movie_train$audience)
+)
+summary(model_xg)
+
+result_xg <- predict(model_xg, mat_test)
+cbind(result_xg, movie_test$audience)
+cbind(10^result_xg, 10^movie_test$audience)
+
+# 오차율 0.928892
+mase(10^movie_test$audience, 10^result_xg)
 ################################################
 
 
-################################################ XGBoost / k-fold
-set.seed(1024)
-random_idx <- order(runif(8972))
-movie_train <- movie[random_idx[1:6729], ]
-movie_validate <- movie[random_idx[6730:8972], ]
-movie_test <- movie[8973:9969, ]
+################################################ XGBoost director producer
+movie_train <- movie[1:7283, ]
+movie_test <- movie[7284:7383, ]
 
-folds <- createFolds(movie$audience, k=10)
-str(folds)
+mat_train <- model.matrix(
+  audience~
+    country_ko+country_us+country_etc+director_m+producer_m
+  +genre_drama+genre_action+genre_comedy+genre_etc+screen+running_time
+  +rating_all+rating_12+rating_15+rating_adult+screen,
+  movie_train
+)
+mat_test <- model.matrix(
+  audience~
+    country_ko+country_us+country_etc+director_m+producer_m
+  +genre_drama+genre_action+genre_comedy+genre_etc+screen+running_time
+  +rating_all+rating_12+rating_15+rating_adult+screen,
+  movie_test
+)
 
-cv_results <- lapply(folds, function(x) {
-  temp_train <- movie[-x, ]
-  temp_test <- movie[x, ]
-  
-  temp_mat_train <- model.matrix(
-    audience~
-      country_ko+country_us+country_etc+director_m+producer_m+actor_all
-    +genre_drama+genre_romance+genre_action+genre_etc+screen+running_time
-    +rating_all+rating_12+rating_15+rating_adult,
-    temp_train
-  )
-  temp_mat_test <- model.matrix(
-    audience~
-      country_ko+country_us+country_etc+director_m+producer_m+actor_all
-    +genre_drama+genre_romance+genre_action+genre_etc+screen+running_time
-    +rating_all+rating_12+rating_15+rating_adult,
-    temp_test
-  )
-  
-  model_fold <- xgb.train(
-    verbose=0,
-    eta=0.025,
-    booster='gbtree',
-    max_depth=3,
-    nround=2500,
-    eval_metric='rmse',
-    data=xgb.DMatrix(temp_mat_train, label=temp_train$audience)
-  )
-  
-  result_fold <- predict(model_fold, temp_mat_test)
-  fold_rmse <- RMSE(10^result_fold, 10^temp_test$audience)
-  return(fold_rmse)
-})
+model_xg <- xgb.train(
+  verbose=0,
+  eta=0.025,
+  booster='gbtree',
+  max_depth=3,
+  nround=2500,
+  eval_metric='rmse',
+  data=xgb.DMatrix(mat_train, label=movie_train$audience)
+)
+summary(model_xg)
 
-# 오차율 869847.8
-sqrt(sum(as.data.frame(cv_results)^2)/10)
+result_xg <- predict(model_xg, mat_test)
+cbind(result_xg, movie_test$audience)
+cbind(10^result_xg, 10^movie_test$audience)
+
+# 오차율 0.8383669
+mase(10^movie_test$audience, 10^result_xg)
 ################################################
 
 
-################################################ XGBoost / k-fold / holiday
-set.seed(1024)
-random_idx <- order(runif(8972))
-movie_train <- movie[random_idx[1:6729], ]
-movie_validate <- movie[random_idx[6730:8972], ]
-movie_test <- movie[8973:9969, ]
-
-folds <- createFolds(movie$audience, k=10)
-str(folds)
-
-cv_results <- lapply(folds, function(x) {
-  temp_train <- movie[-x, ]
-  temp_test <- movie[x, ]
-  
-  temp_mat_train <- model.matrix(
-    audience~
-      country_ko+country_us+country_etc+director_m+producer_m+actor_all
-    +genre_drama+genre_romance+genre_action+genre_etc+screen+running_time
-    +rating_all+rating_12+rating_15+rating_adult+holiday,
-    temp_train
-  )
-  temp_mat_test <- model.matrix(
-    audience~
-      country_ko+country_us+country_etc+director_m+producer_m+actor_all
-    +genre_drama+genre_romance+genre_action+genre_etc+screen+running_time
-    +rating_all+rating_12+rating_15+rating_adult+holiday,
-    temp_test
-  )
-  
-  model_fold <- xgb.train(
-    verbose=0,
-    eta=0.025,
-    booster='gbtree',
-    max_depth=3,
-    nround=2500,
-    eval_metric='rmse',
-    data=xgb.DMatrix(temp_mat_train, label=temp_train$audience)
-  )
-  
-  result_fold <- predict(model_fold, temp_mat_test)
-  fold_rmse <- RMSE(10^result_fold, 10^temp_test$audience)
-  return(fold_rmse)
-})
-
-# 오차율 859288.8
-sqrt(sum(as.data.frame(cv_results)^2)/10)
-################################################
-
-
-################################################ XGBoost / k-fold / series
-series_split <- strsplit(as.character(movie$series), ',')
-for(i in 1:length(movie$movie_id)) {
-  empty_vec <- vector()
-  if(!is.na(series_split[[i]][1])) {
-    for(j in 1:length(series_split[[i]])) {
-      if(series_split[[i]][j] %in% movie$title) {
-        if(movie$release_date[i] > movie[movie$title == series_split[[i]][j], ]$release_date) {
-          empty_vec <- c(empty_vec, movie[movie$title == series_split[[i]][j], ]$audience)
-        }
-      }
-    }
-    if(length(empty_vec) == 0) {
-      movie$series_m[i] <- NA
-    } else {
-      movie$series_m[i] <- mean(empty_vec)
-    }
-  } else {
-    movie$series_m[i] <- NA
-  }
-}
-#movie$series_m[is.na(movie$series_m)] <- mean(movie$series_m, na.rm=T)
-#movie$series_m[is.na(movie$series_m)] <- median(movie$series_m, na.rm=T)
-movie$series_m[is.na(movie$series_m)] <- 0
-
-set.seed(1024)
-random_idx <- order(runif(8972))
-movie_train <- movie[random_idx[1:6729], ]
-movie_validate <- movie[random_idx[6730:8972], ]
-movie_test <- movie[8973:9969, ]
-
-folds <- createFolds(movie$audience, k=10)
-str(folds)
-
-cv_results <- lapply(folds, function(x) {
-  temp_train <- movie[-x, ]
-  temp_test <- movie[x, ]
-  
-  temp_mat_train <- model.matrix(
-    audience~
-      country_ko+country_us+country_etc+director_m+producer_m+actor_all
-    +genre_drama+genre_romance+genre_action+genre_etc+screen+running_time
-    +rating_all+rating_12+rating_15+rating_adult+series_m,
-    temp_train
-  )
-  temp_mat_test <- model.matrix(
-    audience~
-      country_ko+country_us+country_etc+director_m+producer_m+actor_all
-    +genre_drama+genre_romance+genre_action+genre_etc+screen+running_time
-    +rating_all+rating_12+rating_15+rating_adult+series_m,
-    temp_test
-  )
-  
-  model_fold <- xgb.train(
-    verbose=0,
-    eta=0.025,
-    booster='gbtree',
-    max_depth=3,
-    nround=2500,
-    eval_metric='rmse',
-    data=xgb.DMatrix(temp_mat_train, label=temp_train$audience)
-  )
-  
-  result_fold <- predict(model_fold, temp_mat_test)
-  fold_rmse <- RMSE(10^result_fold, 10^temp_test$audience)
-  return(fold_rmse)
-})
-
-# 오차율 877192
-sqrt(sum(as.data.frame(cv_results)^2)/10)
-################################################
-
-
-################################################ XGBoost / k-fold / holiday / series
-series_split <- strsplit(as.character(movie$series), ',')
-for(i in 1:length(movie$movie_id)) {
-  empty_vec <- vector()
-  if(!is.na(series_split[[i]][1])) {
-    for(j in 1:length(series_split[[i]])) {
-      if(series_split[[i]][j] %in% movie$title) {
-        if(movie$release_date[i] > movie[movie$title == series_split[[i]][j], ]$release_date) {
-          empty_vec <- c(empty_vec, movie[movie$title == series_split[[i]][j], ]$audience)
-        }
-      }
-    }
-    if(length(empty_vec) == 0) {
-      movie$series_m[i] <- NA
-    } else {
-      movie$series_m[i] <- mean(empty_vec)
-    }
-  } else {
-    movie$series_m[i] <- NA
-  }
-}
-#movie$series_m[is.na(movie$series_m)] <- mean(movie$series_m, na.rm=T)
-#movie$series_m[is.na(movie$series_m)] <- median(movie$series_m, na.rm=T)
-movie$series_m[is.na(movie$series_m)] <- 0
-
-set.seed(1024)
-random_idx <- order(runif(8972))
-movie_train <- movie[random_idx[1:6729], ]
-movie_validate <- movie[random_idx[6730:8972], ]
-movie_test <- movie[8973:9969, ]
-
-folds <- createFolds(movie$audience, k=10)
-str(folds)
-
-cv_results <- lapply(folds, function(x) {
-  temp_train <- movie[-x, ]
-  temp_test <- movie[x, ]
-  
-  temp_mat_train <- model.matrix(
-    audience~
-      country_ko+country_us+country_etc+director_m+producer_m+actor_all
-    +genre_drama+genre_romance+genre_action+genre_etc+screen+running_time
-    +rating_all+rating_12+rating_15+rating_adult+holiday+series_m,
-    temp_train
-  )
-  temp_mat_test <- model.matrix(
-    audience~
-      country_ko+country_us+country_etc+director_m+producer_m+actor_all
-    +genre_drama+genre_romance+genre_action+genre_etc+screen+running_time
-    +rating_all+rating_12+rating_15+rating_adult+holiday+series_m,
-    temp_test
-  )
-  
-  model_fold <- xgb.train(
-    verbose=0,
-    eta=0.025,
-    booster='gbtree',
-    max_depth=3,
-    nround=2500,
-    eval_metric='rmse',
-    data=xgb.DMatrix(temp_mat_train, label=temp_train$audience)
-  )
-  
-  result_fold <- predict(model_fold, temp_mat_test)
-  fold_rmse <- RMSE(10^result_fold, 10^temp_test$audience)
-  return(fold_rmse)
-})
-
-# 오차율 870308.5
-sqrt(sum(as.data.frame(cv_results)^2)/10)
-################################################
-
-
-################################################ XGBoost / k-fold / holiday / grid search
-set.seed(1024)
-random_idx <- order(runif(8972))
-movie_train <- movie[random_idx[1:8972], ]
+################################################ XGBoost director producer actor
+movie_train <- movie[1:7283, ]
+movie_test <- movie[7284:7383, ]
 
 mat_train <- model.matrix(
   audience~
     country_ko+country_us+country_etc+director_m+producer_m+actor_all
-  +genre_drama+genre_romance+genre_action+genre_etc+screen+running_time
-  +rating_all+rating_12+rating_15+rating_adult,
+  +genre_drama+genre_action+genre_comedy+genre_etc+screen+running_time
+  +rating_all+rating_12+rating_15+rating_adult+screen,
+  movie_train
+)
+mat_test <- model.matrix(
+  audience~
+    country_ko+country_us+country_etc+director_m+producer_m+actor_all
+  +genre_drama+genre_action+genre_comedy+genre_etc+screen+running_time
+  +rating_all+rating_12+rating_15+rating_adult+screen,
+  movie_test
+)
+
+model_xg <- xgb.train(
+  verbose=0,
+  eta=0.025,
+  booster='gbtree',
+  max_depth=3,
+  nround=2500,
+  eval_metric='rmse',
+  data=xgb.DMatrix(mat_train, label=movie_train$audience)
+)
+summary(model_xg)
+
+result_xg <- predict(model_xg, mat_test)
+cbind(result_xg, movie_test$audience)
+cbind(10^result_xg, 10^movie_test$audience)
+
+# 오차율 0.7500197
+mase(10^movie_test$audience, 10^result_xg)
+################################################
+
+
+################################################ XGBoost director producer actor series
+movie_train <- movie[1:7283, ]
+movie_test <- movie[7284:7383, ]
+
+mat_train <- model.matrix(
+  audience~
+    country_ko+country_us+country_etc+director_m+producer_m+actor_all
+  +genre_drama+genre_action+genre_comedy+genre_etc+screen+running_time
+  +rating_all+rating_12+rating_15+rating_adult+screen+series_m,
+  movie_train
+)
+mat_test <- model.matrix(
+  audience~
+    country_ko+country_us+country_etc+director_m+producer_m+actor_all
+  +genre_drama+genre_action+genre_comedy+genre_etc+screen+running_time
+  +rating_all+rating_12+rating_15+rating_adult+screen+series_m,
+  movie_test
+)
+
+model_xg <- xgb.train(
+  verbose=0,
+  eta=0.025,
+  booster='gbtree',
+  max_depth=3,
+  nround=2500,
+  eval_metric='rmse',
+  data=xgb.DMatrix(mat_train, label=movie_train$audience)
+)
+summary(model_xg)
+
+result_xg <- predict(model_xg, mat_test)
+cbind(result_xg, movie_test$audience)
+cbind(10^result_xg, 10^movie_test$audience)
+
+# 오차율 0.733603
+mase(10^movie_test$audience, 10^result_xg)
+################################################
+
+
+################################################ XGBoost director producer actor series holiday
+movie_train <- movie[1:7283, ]
+movie_test <- movie[7284:7383, ]
+
+mat_train <- model.matrix(
+  audience~
+    country_ko+country_us+country_etc+director_m+producer_m+actor_all
+  +genre_drama+genre_action+genre_comedy+genre_etc+screen+running_time
+  +rating_all+rating_12+rating_15+rating_adult+screen+series_m+holiday,
+  movie_train
+)
+mat_test <- model.matrix(
+  audience~
+    country_ko+country_us+country_etc+director_m+producer_m+actor_all
+  +genre_drama+genre_action+genre_comedy+genre_etc+screen+running_time
+  +rating_all+rating_12+rating_15+rating_adult+screen+series_m+holiday,
+  movie_test
+)
+
+model_xg <- xgb.train(
+  verbose=0,
+  eta=0.025,
+  booster='gbtree',
+  max_depth=3,
+  nround=2500,
+  eval_metric='rmse',
+  data=xgb.DMatrix(mat_train, label=movie_train$audience)
+)
+summary(model_xg)
+
+result_xg <- predict(model_xg, mat_test)
+cbind(result_xg, movie_test$audience)
+cbind(10^result_xg, 10^movie_test$audience)
+
+# 오차율 0.733603
+mase(10^movie_test$audience, 10^result_xg)
+################################################
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+################################################ XGBoost / k-fold
+set.seed(1024)
+random_idx <- order(runif(7283))
+movie_train <- movie[random_idx[1:4370], ]
+movie_validate <- movie[random_idx[4371:7283], ]
+movie_test <- movie[7284:7383, ]
+
+folds <- createFolds(movie$audience, k=10)
+str(folds)
+
+cv_results <- lapply(folds, function(x) {
+  temp_train <- movie[-x, ]
+  temp_test <- movie[x, ]
+  
+  temp_mat_train <- model.matrix(
+    audience~
+      country_ko+country_us+country_etc+director_m+producer_m+actor_all
+    +genre_drama+genre_action+genre_comedy+genre_etc+screen+running_time
+    +rating_all+rating_12+rating_15+rating_adult+series_m+screen+holiday,
+    temp_train
+  )
+  temp_mat_test <- model.matrix(
+    audience~
+      country_ko+country_us+country_etc+director_m+producer_m+actor_all
+    +genre_drama+genre_action+genre_comedy+genre_etc+screen+running_time
+    +rating_all+rating_12+rating_15+rating_adult+series_m+screen+holiday,
+    temp_test
+  )
+  
+  model_fold <- xgb.train(
+    verbose=0,
+    eta=0.025,
+    booster='gbtree',
+    max_depth=3,
+    nround=2500,
+    eval_metric='rmse',
+    data=xgb.DMatrix(temp_mat_train, label=temp_train$audience)
+  )
+  
+  result_fold <- predict(model_fold, temp_mat_test)
+  fold_rmse <- RMSE(10^result_fold, 10^temp_test$audience)
+  return(fold_rmse)
+})
+
+# 오차율 0.8162288
+sqrt(sum(as.data.frame(cv_results)^2)/10)
+mase(10^movie_test$audience, 10^result_xg)
+################################################
+
+
+################################################ XGBoost / k-fold / grid search
+set.seed(1024)
+random_idx <- order(runif(7283))
+movie_train <- movie[random_idx[1:7283], ]
+
+mat_train <- model.matrix(
+  audience~
+    country_ko+country_us+country_etc+director_m+producer_m+actor_all
+  +genre_drama+genre_action+genre_comedy+genre_etc+screen+running_time
+  +rating_all+rating_12+rating_15+rating_adult+series_m,
   movie_train
 )
 
 search_grid_sub_col  <- expand.grid(
-  subsample = c(1, 0.5),
-  colsample_bytree = c(1, 0.5),
-  max_depth = c(1, 3),
-  min_child = seq(1),
-  eta = c(0.01, 0.025)
+  subsample = c(1, 0.75, 0.5),
+  colsample_bytree = c(1, 0.8, 0.6),
+  max_depth = c(1, 2, 3),
+  min_child = seq(1, 2),
+  eta = c(0.01, 0.02, 0.03)
 )
 
 system.time(
@@ -581,10 +612,10 @@ head(output)
 
 
 set.seed(1024)
-random_idx <- order(runif(8972))
-movie_train <- movie[random_idx[1:6729], ]
-movie_validate <- movie[random_idx[6730:8972], ]
-movie_test <- movie[8973:9969, ]
+random_idx <- order(runif(7283))
+movie_train <- movie[random_idx[1:4370], ]
+movie_validate <- movie[random_idx[4371:7283], ]
+movie_test <- movie[7284:7383, ]
 
 folds <- createFolds(movie$audience, k=10)
 str(folds)
@@ -596,15 +627,15 @@ cv_results <- lapply(folds, function(x) {
   temp_mat_train <- model.matrix(
     audience~
       country_ko+country_us+country_etc+director_m+producer_m+actor_all
-    +genre_drama+genre_romance+genre_action+genre_etc+screen+running_time
-    +rating_all+rating_12+rating_15+rating_adult+holiday,
+    +genre_drama+genre_action+genre_comedy+genre_etc+screen+running_time
+    +rating_all+rating_12+rating_15+rating_adult+series_m,
     temp_train
   )
   temp_mat_test <- model.matrix(
     audience~
       country_ko+country_us+country_etc+director_m+producer_m+actor_all
-    +genre_drama+genre_romance+genre_action+genre_etc+screen+running_time
-    +rating_all+rating_12+rating_15+rating_adult+holiday,
+    +genre_drama+genre_action+genre_comedy+genre_etc+screen+running_time
+    +rating_all+rating_12+rating_15+rating_adult+series_m,
     temp_test
   )
   
@@ -612,7 +643,7 @@ cv_results <- lapply(folds, function(x) {
     verbose=0,
     eta=0.01,
     booster='gbtree',
-    max_depth=3,
+    max_depth=1,
     subsample=1,
     colsample_bytree=1,
     nround=2500,
@@ -625,6 +656,7 @@ cv_results <- lapply(folds, function(x) {
   return(fold_rmse)
 })
 
-# 오차율 854425.7
+# 오차율 0.8162288
 sqrt(sum(as.data.frame(cv_results)^2)/10)
+mase(10^movie_test$audience, 10^result_xg)
 ################################################
